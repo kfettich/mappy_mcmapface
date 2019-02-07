@@ -1,0 +1,244 @@
+---
+title: "PAWS Geocode"
+author: "Joy Payton"
+date: "2/6/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+# Load Packages
+
+```{r}
+library(dplyr)
+library(ggmap)
+library(rgdal)
+library(sp)
+```
+
+# Make Some Fake Data
+
+## Fully Broken Up Addresses
+
+```{r}
+fake_addresses <- data.frame(ID = c(123,234,653),
+                             House_Num = c(3535, 2716, 1915),
+                             Street = c("Market St.",
+                                        "South Street",
+                                        "S 9th St."),
+                             City = "Philadelphia",
+                             State = "PA",
+                             ZIP = c("19104",
+                                     "19148",
+                                     "19147"))
+```
+
+## House Number and Street in Same Field
+
+```{r}
+fake_addresses_1 <- data.frame(ID = c(123,234,653),
+                             Street = c("3535 Market St.",
+                                        "2716 South Street",
+                                        "1915 S 9th St."),
+                             City = "Philadelphia",
+                             State = "PA",
+                             ZIP = c("19104",
+                                     "19148",
+                                     "19147"))
+```
+
+## Whole Street Address in Single Field
+
+```{r}
+fake_addresses_2 <- data.frame(code = c(345,623,123),
+                               address = c("3535 Market St., Philadelphia, PA, 19104",
+                                          "2716 South Street, Philadelphia, PA, 19148",
+                                          "1915 S 9th St., Philadelphia, PA, 19147"))
+```
+
+# Geocode that Jawn
+
+It's important to *always* get lat/long because polygon boundaries change, or you might want different polygons, but lat/long is good forever / until the end of civilization as we know it
+
+I did this the lazy way!  You can use Google as the source for the geocode but that requires a (potentially paid at high levels) API key secured with a credit card number.  So I'm using "dsk" (data science tookit) instead.
+
+ZERO error checking here, e.g. if address is missing etc.  If you have something ungeocodable, it'll barf.  Maybe I could put try/catch in here?
+
+We put in column index numbers -- see parameter declaration for deets.
+
+Here we assume that the address will either be all together, e.g. "123 Main Street, Smithville, NY 10010", so, e.g., 
+
+`geocodeToLatLong(fake_addresses_2, 2)`
+  
+or completely fragmented, e.g.  123 | Main Street | Smithville | NY | 10010, so, e.g. 
+
+`geocodeToLatLong(fake_addresses,NA, 2,3,4,5,6)`
+
+NOTE you can leave one or maybe two fields as NA (say if you have house number and street name together in one col) and it may/should still work... but YMMV:  e.g. 
+
+`geocodeToLatLong(fake_addresses_1,NA, NA,2,3,4,5)`
+  
+Either way we give column indices.
+  
+Returns df back but with first 2 cols as lat/long
+
+```{r}
+geocodeToLatLong <- function(df,
+                             full_address = NA,  # col number, or NA
+                             house_num_idx = 1,  # col number /NA (ignored if full_address given)
+                             street_idx = 2,     # col number /NA (ignored if full_address given)
+                             city_idx = 3,       # col number /NA (ignored if full_address given)
+                             state_idx = 4,      # col number /NA (ignored if full_address given)
+                             zip_idx = 5) {      # col number /NA (ignored if full_address given)
+  
+
+if (!is.na(full_address)) {
+  addresses <- as.character(df[,full_address])
+}
+else {
+  addresses <- vector(mode="character", length=nrow(df))
+  if (!is.na(house_num_idx)) {addresses <- paste(addresses, df[,house_num_idx], sep = "")}
+  if (!is.na(street_idx)) {addresses <- paste(addresses, df[,street_idx], sep = " ")}
+  if (!is.na(city_idx)) {addresses <- paste(addresses, df[,city_idx], sep = ", ")}
+  if (!is.na(state_idx)) {addresses <- paste(addresses, df[,state_idx], sep = ", ")}
+  if (!is.na(zip_idx)) {addresses <- paste(addresses, df[,zip_idx], sep = " ")}
+  }
+
+geocoded <- data.frame(address = addresses, stringsAsFactors = FALSE) %>% 
+  mutate_geocode(address, source = "dsk")  # not using Google bc of limits / CC# / $$$
+return(cbind(geocoded %>% select(lat,lon), df))
+}
+```
+
+# Proof of Geocoding Concept
+
+```{r}
+geocoded_0 <- geocodeToLatLong(fake_addresses,NA, 2,3,4,5,6)
+geocoded_0
+```
+
+```{r}
+geocoded_1 <- geocodeToLatLong(fake_addresses_1,NA,NA,2,3,4,5)
+geocoded_1
+```
+
+```{r}
+geocoded_2 <- geocodeToLatLong(fake_addresses_2, 2)
+geocoded_2
+```
+
+# Get Maps
+
+OK, now you gotta get a map of the area you care about... this can be trixy.  I downloaded shapefiles from the Census Bureau bc it's a point and click interface and I couldn't be bothered to learn the API for this.
+
+## Get PA
+
+NOTE -- I'm assuming you're running this where the folder containing the shapefiles is at the same level as your working directory.
+
+```{r}
+nj <- readOGR(dsn="tl_2018_34_tract")
+```
+
+## Get Just the NJ Counties We Want
+
+(We can expand if needed): 
+
+* Gloucester (015)
+* Burlington (005)
+* Camden (007)
+
+Codes from <https://www2.census.gov/geo/docs/reference/codes/files/st34_nj_cou.txt>
+
+```{r}
+nj_counties <- nj[which(nj$COUNTYFP %in% c("005","007","015")),]
+```
+
+## Same Deal with PA!
+
+Codes from <https://www2.census.gov/geo/docs/reference/codes/files/st42_pa_cou.txt>
+
+* Philadelphia (101)
+* Bucks (017)
+* Montgomery (091)
+* Delaware (045)
+
+```{r}
+pa <- readOGR(dsn = "tl_2018_42_tract")
+pa_counties <- pa[which(pa$COUNTYFP %in% c("017","045","091", "101")),]
+```
+
+## Combine 'em
+
+These counties are (presumably) the PAWS catchment for volunteers, adopters etc.
+
+```{r}
+paws_catchment <- rbind(nj_counties, pa_counties)
+head(paws_catchment@data)
+```
+
+Clean up -- the shapefiles are pretty big.
+
+```{r}
+rm(list = c("nj", "pa", "nj_counties", "pa_counties"))
+```
+
+# Find Out Polygons For Each Point
+
+```{r}
+makePolygons <- function(map, addresses, lat_col_name, long_col_name) {
+  coordinates <- SpatialPoints(addresses[c(long_col_name,lat_col_name)])
+  # IMPORTANT -- add a projection e.g. mercator, etc.
+  proj4string(coordinates) <- proj4string(map)
+  polygon_data <- over(coordinates, map)
+  return(cbind (polygon_data, addresses))
+}
+```
+
+# Proof of Concept for Polygon-o-Matic
+
+```{r}
+addresses_w_census <- makePolygons(paws_catchment, geocoded_1, "lat", "lon")
+addresses_w_census
+```
+
+# Map That Jawn
+
+## Static Map
+
+This is hard to make big enough to be interesting, with all the counties I chose...
+
+```{r}
+library(broom)
+paws_fortified <- tidy(paws_catchment, region = "GEOID")
+
+paws_map <- ggplot() + 
+  geom_polygon(data=paws_fortified, 
+               aes(x=long, y=lat, group=group, fill=NA), 
+               color = "black", fill=NA, size=0.1) +
+  geom_point(data=addresses_w_census, aes(x=lon, y=lat, color="red", shape=".", alpha=0.5)) + 
+  coord_map() + 
+  theme_nothing()
+paws_map
+```
+
+## Dynamic Map
+
+This is better for zooming, etc.  We could make different markers for different stakeholders e.g. volunteers, adopters, surrenderers, etc.
+
+```{r}
+library(leaflet)
+
+interactive_map <- leaflet(paws_catchment) %>%
+  setView(lng = mean(as.numeric(addresses_w_census$lon), na.rm=TRUE), 
+          lat = mean(as.numeric(addresses_w_census$lat), na.rm=TRUE), zoom = 11) %>%
+  addPolygons(
+    data = paws_catchment,
+    weight = 1,  # border thickness
+    opacity = 0.5, # border opacity
+    color = "black" # border color
+    ) %>%
+  addMarkers(lng = addresses_w_census$lon, lat=addresses_w_census$lat)
+interactive_map
+
+```
